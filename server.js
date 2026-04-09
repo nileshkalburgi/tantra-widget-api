@@ -223,34 +223,55 @@ async function generateWidgetWithClaude(prompt) {
     throw new Error('Claude API key not configured');
   }
   
-  const systemPrompt = `You are an expert WordPress and Elementor developer. Your task is to generate a complete, production-ready Elementor widget based on the user's description.
+  const systemPrompt = `You are an expert Elementor widget developer. Generate a complete, production-ready widget.
 
-CRITICAL REQUIREMENTS - NEVER SKIP THESE:
-1. ALWAYS start with: <?php followed by ABSPATH security check
-2. The security check MUST be: if ( ! defined( 'ABSPATH' ) ) { exit; }
-3. Generate ONLY complete, working PHP code - NO explanations, NO markdown, NO comments outside code
-4. Code must be 100% COMPLETE - never truncate or end mid-line
-5. Class must extend \\Elementor\\Widget_Base
-6. Use the 'tantra-addons' category
-7. Include comprehensive controls in register_controls()
-8. Include styling options (colors, typography, spacing, responsive controls)
-9. Use proper escaping (esc_html, esc_attr, esc_url, wp_kses_post)
-10. Include inline CSS in the render() method if needed
-11. Follow WordPress and Elementor coding standards
-12. Make it responsive and accessible
-13. Generate creative, professional widgets with good UX
+MANDATORY STRUCTURE - FOLLOW EXACTLY:
 
-TEMPLATE START:
 <?php
 if ( ! defined( 'ABSPATH' ) ) {
-	exit; // Exit if accessed directly.
+	exit;
 }
 
-class Your_Widget_Name extends \\Elementor\\Widget_Base {
-	// ... rest of widget code
+class Widget_Name extends \\Elementor\\Widget_Base {
+	
+	public function get_name() {
+		return 'widget_slug';
+	}
+	
+	public function get_title() {
+		return esc_html__( 'Widget Title', 'tantra-addons' );
+	}
+	
+	public function get_icon() {
+		return 'eicon-icon-name';
+	}
+	
+	public function get_categories() {
+		return [ 'tantra-addons' ];
+	}
+	
+	protected function register_controls() {
+		// Add controls here
+	}
+	
+	protected function render() {
+		$settings = $this->get_settings_for_display();
+		// Render widget HTML
+	}
 }
 
-Generate the COMPLETE widget code. Never truncate. Always end properly with closing braces.`;
+CRITICAL RULES:
+1. Output ONLY the PHP code - NO explanations, NO markdown, NO extra text
+2. Start with <?php and ABSPATH check - ALWAYS
+3. Class name format: Descriptive_Widget_Name (CamelCase with underscores)
+4. Slug format: descriptive_widget (lowercase with underscores)
+5. Include get_name(), get_title(), get_icon(), get_categories()
+6. Add comprehensive controls with good defaults
+7. Use proper WordPress escaping
+8. Make it complete and functional
+9. End with closing brace }
+
+DO NOT add any text before <?php or after the closing }`;
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -261,7 +282,8 @@ Generate the COMPLETE widget code. Never truncate. Always end properly with clos
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 8000, // INCREASED from 4000 to prevent truncation
+      max_tokens: 6000, // OPTIMIZED: 6000 is sweet spot - fast but complete
+      temperature: 0.3, // ADDED: Lower temperature for more consistent output
       system: systemPrompt,
       messages: [{ role: 'user', content: prompt }],
     }),
