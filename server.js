@@ -225,19 +225,32 @@ async function generateWidgetWithClaude(prompt) {
   
   const systemPrompt = `You are an expert WordPress and Elementor developer. Your task is to generate a complete, production-ready Elementor widget based on the user's description.
 
-REQUIREMENTS:
-1. Generate ONLY PHP code - no explanations before or after
-2. Code must start with <?php and include proper security check
-3. Class must extend \\Elementor\\Widget_Base
-4. Use the 'tantra-addons' category
-5. Include comprehensive controls in register_controls()
-6. Include styling options (colors, typography, spacing, responsive controls)
-7. Use proper escaping (esc_html, esc_attr, esc_url, wp_kses_post)
-8. Include inline CSS in the render() method if needed
-9. Follow WordPress and Elementor coding standards
-10. Make it responsive and accessible
+CRITICAL REQUIREMENTS - NEVER SKIP THESE:
+1. ALWAYS start with: <?php followed by ABSPATH security check
+2. The security check MUST be: if ( ! defined( 'ABSPATH' ) ) { exit; }
+3. Generate ONLY complete, working PHP code - NO explanations, NO markdown, NO comments outside code
+4. Code must be 100% COMPLETE - never truncate or end mid-line
+5. Class must extend \\Elementor\\Widget_Base
+6. Use the 'tantra-addons' category
+7. Include comprehensive controls in register_controls()
+8. Include styling options (colors, typography, spacing, responsive controls)
+9. Use proper escaping (esc_html, esc_attr, esc_url, wp_kses_post)
+10. Include inline CSS in the render() method if needed
+11. Follow WordPress and Elementor coding standards
+12. Make it responsive and accessible
+13. Generate creative, professional widgets with good UX
 
-Generate creative, professional widgets with good UX and extensive customization options.`;
+TEMPLATE START:
+<?php
+if ( ! defined( 'ABSPATH' ) ) {
+	exit; // Exit if accessed directly.
+}
+
+class Your_Widget_Name extends \\Elementor\\Widget_Base {
+	// ... rest of widget code
+}
+
+Generate the COMPLETE widget code. Never truncate. Always end properly with closing braces.`;
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -248,7 +261,7 @@ Generate creative, professional widgets with good UX and extensive customization
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 4000,
+      max_tokens: 8000, // INCREASED from 4000 to prevent truncation
       system: systemPrompt,
       messages: [{ role: 'user', content: prompt }],
     }),
