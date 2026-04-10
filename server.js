@@ -1,7 +1,7 @@
 /**
- * Tantra Widget Generator - Backend API Server (Render + PostgreSQL)
+ * Tantra Widget Generator - Backend API with Vision Support
  * 
- * Optimized for Render.com deployment with PostgreSQL database
+ * NEW: Vision-to-Code endpoint for image-based widget generation
  */
 
 const express = require('express');
@@ -14,15 +14,13 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─────────────────────────────────────────────────────────────
-// CRITICAL: Trust proxy for Render's load balancer
-// ─────────────────────────────────────────────────────────────
 app.set('trust proxy', true);
 
 // Middleware
 app.use(helmet());
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // INCREASED for base64 images
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Rate limiting
 const limiter = rateLimit({
@@ -35,23 +33,21 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 // ─────────────────────────────────────────────────────────────
-// PostgreSQL Database Connection (Render)
+// PostgreSQL Database Connection
 // ─────────────────────────────────────────────────────────────
 
 let db;
 
 async function initDatabase() {
   try {
-    // Render provides DATABASE_URL automatically
     db = new Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
     });
 
-    // Test connection
     await db.query('SELECT NOW()');
 
-    // Create tables if they don't exist
+    // Create tables
     await db.query(`
       CREATE TABLE IF NOT EXISTS licenses (
         id SERIAL PRIMARY KEY,
@@ -79,6 +75,7 @@ async function initDatabase() {
         email VARCHAR(255) NOT NULL,
         year_month VARCHAR(7) NOT NULL,
         usage_count INTEGER NOT NULL DEFAULT 0,
+        vision_count INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(license_key, year_month)
@@ -93,7 +90,6 @@ async function initDatabase() {
     console.log('✅ PostgreSQL connected and tables initialized');
   } catch (error) {
     console.error('❌ Database connection failed:', error.message);
-    console.log('⚠️  Running without database - using in-memory storage');
     db = null;
   }
 }
@@ -183,19 +179,34 @@ async function getMonthlyUsage(license) {
   }
 }
 
-async function incrementUsage(license) {
+async function incrementUsage(license, isVision = false) {
   try {
     const now = new Date();
     const yearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     const licenseKey = license.license_key || license.licenseKey;
     
     if (db) {
-      await db.query(`
-        INSERT INTO usage_tracking (license_key, email, year_month, usage_count)
-        VALUES ($1, $2, $3, 1)
-        ON CONFLICT (license_key, year_month)
-        DO UPDATE SET usage_count = usage_tracking.usage_count + 1, updated_at = CURRENT_TIMESTAMP
-      `, [licenseKey, license.email, yearMonth]);
+      if (isVision) {
+        // Track vision usage separately
+        await db.query(`
+          INSERT INTO usage_tracking (license_key, email, year_month, usage_count, vision_count)
+          VALUES ($1, $2, $3, 1, 1)
+          ON CONFLICT (license_key, year_month)
+          DO UPDATE SET 
+            usage_count = usage_tracking.usage_count + 1,
+            vision_count = usage_tracking.vision_count + 1,
+            updated_at = CURRENT_TIMESTAMP
+        `, [licenseKey, license.email, yearMonth]);
+      } else {
+        await db.query(`
+          INSERT INTO usage_tracking (license_key, email, year_month, usage_count, vision_count)
+          VALUES ($1, $2, $3, 1, 0)
+          ON CONFLICT (license_key, year_month)
+          DO UPDATE SET 
+            usage_count = usage_tracking.usage_count + 1,
+            updated_at = CURRENT_TIMESTAMP
+        `, [licenseKey, license.email, yearMonth]);
+      }
       
       if (license.credits !== null && license.credits !== undefined) {
         await db.query(
@@ -215,6 +226,10 @@ async function incrementUsage(license) {
     console.error('Increment usage error:', error);
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+// Claude API Functions
+// ─────────────────────────────────────────────────────────────
 
 async function generateWidgetWithClaude(prompt) {
   const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
@@ -282,8 +297,8 @@ DO NOT add any text before <?php or after the closing }`;
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 6000, // OPTIMIZED: 6000 is sweet spot - fast but complete
-      temperature: 0.3, // ADDED: Lower temperature for more consistent output
+      max_tokens: 6000,
+      temperature: 0.3,
       system: systemPrompt,
       messages: [{ role: 'user', content: prompt }],
     }),
@@ -295,7 +310,115 @@ DO NOT add any text before <?php or after the closing }`;
   }
 
   const data = await response.json();
-  return data.content[0].text;
+  return {
+    code: data.content[0].text,
+    usage: data.usage
+  };
+}
+
+/**
+ * NEW: Generate widget from image + text prompt using Vision API
+ */
+async function generateWidgetWithVision(imageData, imageType, textPrompt) {
+  const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+  
+  if (!CLAUDE_API_KEY) {
+    throw new Error('Claude API key not configured');
+  }
+  
+  const systemPrompt = `You are an expert Elementor widget developer. Analyze the UI design image provided and generate a complete, production-ready Elementor widget that recreates this design.
+
+MANDATORY STRUCTURE - FOLLOW EXACTLY:
+
+<?php
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+class Widget_Name extends \\Elementor\\Widget_Base {
+	
+	public function get_name() {
+		return 'widget_slug';
+	}
+	
+	public function get_title() {
+		return esc_html__( 'Widget Title', 'tantra-addons' );
+	}
+	
+	public function get_icon() {
+		return 'eicon-icon-name';
+	}
+	
+	public function get_categories() {
+		return [ 'tantra-addons' ];
+	}
+	
+	protected function register_controls() {
+		// Add controls matching the design
+	}
+	
+	protected function render() {
+		$settings = $this->get_settings_for_display();
+		// Render widget HTML matching the design
+	}
+}
+
+CRITICAL RULES FOR VISION-TO-CODE:
+1. Carefully analyze the image layout, colors, typography, spacing
+2. Recreate the visual design as accurately as possible
+3. Add Elementor controls for all customizable elements (colors, text, images, spacing)
+4. Use inline CSS or style tags for design-specific styling
+5. Output ONLY the PHP code - NO explanations
+6. Start with <?php and ABSPATH check
+7. Make all visual elements controllable via Elementor panel
+
+DO NOT add any text before <?php or after the closing }`;
+
+  // Construct the message content with image
+  const messageContent = [
+    {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: imageType,
+        data: imageData
+      }
+    },
+    {
+      type: 'text',
+      text: textPrompt || 'Analyze this UI design and generate an Elementor widget that recreates it exactly. Pay attention to layout, colors, typography, spacing, and interactive elements.'
+    }
+  ];
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': CLAUDE_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 6000,
+      temperature: 0.3,
+      system: systemPrompt,
+      messages: [{
+        role: 'user',
+        content: messageContent
+      }],
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error?.message || 'Claude Vision API error');
+  }
+
+  const data = await response.json();
+  return {
+    code: data.content[0].text,
+    usage: data.usage
+  };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -306,7 +429,8 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: Date.now(),
-    version: '1.0.0',
+    version: '2.0.0',
+    features: ['text-generation', 'vision-generation'],
     database: db ? 'connected' : 'in-memory',
     platform: 'render'
   });
@@ -347,6 +471,7 @@ app.post('/api/validate-license', async (req, res) => {
   });
 });
 
+// Existing text-only generation endpoint
 app.post('/api/generate-widget', async (req, res) => {
   try {
     const { license_key, prompt, domain } = req.body;
@@ -373,10 +498,10 @@ app.post('/api/generate-widget', async (req, res) => {
       });
     }
     
-    const widgetCode = await generateWidgetWithClaude(prompt);
-    await incrementUsage(license);
+    const result = await generateWidgetWithClaude(prompt);
+    await incrementUsage(license, false);
     
-    console.log(`Widget generated for ${license.email} - Plan: ${license.plan}`);
+    console.log(`Widget generated (text) for ${license.email} - Plan: ${license.plan}`);
     
     const monthlyUsage = await getMonthlyUsage(license);
     const monthlyLimit = license.monthly_limit || license.monthlyLimit || 20;
@@ -391,13 +516,15 @@ app.post('/api/generate-widget', async (req, res) => {
     
     res.json({
       success: true,
-      widget_code: widgetCode,
+      widget_code: result.code,
+      generation_type: 'text',
       usage: {
         credits: updatedCredits,
         monthlyUsage: monthlyUsage,
         monthlyLimit: monthlyLimit,
         creditsRemaining: updatedCredits !== null ? updatedCredits : null,
-        quotaRemaining: monthlyLimit - monthlyUsage
+        quotaRemaining: monthlyLimit - monthlyUsage,
+        tokensUsed: result.usage
       },
       message: 'Widget generated successfully'
     });
@@ -406,6 +533,102 @@ app.post('/api/generate-widget', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to generate widget. Please try again.'
+    });
+  }
+});
+
+/**
+ * NEW: Generate widget from image using Vision API
+ * POST /api/generate-widget-vision
+ * Body: {
+ *   license_key: string,
+ *   image: string (base64),
+ *   image_type: string (image/png, image/jpeg, etc.),
+ *   prompt: string (optional additional instructions)
+ * }
+ */
+app.post('/api/generate-widget-vision', async (req, res) => {
+  try {
+    const { license_key, image, image_type, prompt, domain } = req.body;
+    
+    // Validation
+    if (!license_key || !image || !image_type) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'License key, image, and image_type are required' 
+      });
+    }
+    
+    // Validate image type
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
+    if (!allowedTypes.includes(image_type)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid image type. Allowed: PNG, JPEG, WebP, GIF'
+      });
+    }
+    
+    // Validate license
+    const validation = await validateLicense(license_key);
+    if (!validation.valid) {
+      return res.status(401).json({ success: false, error: validation.error });
+    }
+    
+    const license = validation.license;
+    
+    // Check domain
+    if (domain && license.domain && license.domain !== domain) {
+      return res.status(401).json({ success: false, error: 'License not valid for this domain' });
+    }
+    
+    // Check credits/quota
+    if (!await hasCreditsAvailable(license)) {
+      return res.status(403).json({
+        success: false,
+        error: 'No credits or quota remaining. Please upgrade your plan.'
+      });
+    }
+    
+    // Generate widget using Vision API
+    const result = await generateWidgetWithVision(image, image_type, prompt);
+    
+    // Increment usage (mark as vision)
+    await incrementUsage(license, true);
+    
+    console.log(`Widget generated (vision) for ${license.email} - Plan: ${license.plan}`);
+    
+    // Get updated usage stats
+    const monthlyUsage = await getMonthlyUsage(license);
+    const monthlyLimit = license.monthly_limit || license.monthlyLimit || 20;
+    
+    let updatedCredits = license.credits;
+    if (db && updatedCredits !== null) {
+      const creditResult = await db.query('SELECT credits FROM licenses WHERE license_key = $1', [license.license_key]);
+      if (creditResult.rows.length > 0) {
+        updatedCredits = creditResult.rows[0].credits;
+      }
+    }
+    
+    res.json({
+      success: true,
+      widget_code: result.code,
+      generation_type: 'vision',
+      usage: {
+        credits: updatedCredits,
+        monthlyUsage: monthlyUsage,
+        monthlyLimit: monthlyLimit,
+        creditsRemaining: updatedCredits !== null ? updatedCredits : null,
+        quotaRemaining: monthlyLimit - monthlyUsage,
+        tokensUsed: result.usage
+      },
+      message: 'Widget generated from design successfully'
+    });
+  } catch (error) {
+    console.error('Error generating widget from vision:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate widget from design. Please try again.',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -512,11 +735,12 @@ async function startServer() {
     console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
-║   🚀 Tantra Widget Generator API Server                  ║
+║   🚀 Tantra Widget Generator API Server v2.0             ║
 ║                                                           ║
 ║   Platform: Render.com                                    ║
 ║   Port: ${PORT}                                              ║
 ║   Database: ${db ? 'PostgreSQL ✅' : 'In-Memory ⚠️'}      ║
+║   Features: Text + Vision Generation ✅                   ║
 ║   Trust Proxy: ENABLED ✅                                 ║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
